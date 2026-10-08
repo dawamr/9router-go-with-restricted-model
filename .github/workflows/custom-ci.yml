@@ -1,0 +1,246 @@
+# =============================================================================
+# Custom CI — validation for this fork.
+#
+# Scope: this validates the tree as it exists on the branch under test. It runs
+# only commands that are verified to work in this repository, and every one of
+# them was executed locally before being wired in here.
+#
+# Security posture:
+#   * Least privilege: contents:read everywhere. Nothing in this file needs more.
+#   * NO secrets. This fork has no production credentials configured, and none of
+#     these jobs references one. Fork PRs get a read-only token and no secrets,
+#     so a PR cannot exfiltrate anything this repository holds.
+#   * pull_request_target is deliberately NOT used.
+#   * Every third-party action is pinned to a full commit SHA (the version tag is
+#     in a trailing comment) so a retagged or compromised release cannot be
+#     pulled in silently.
+#   * The automation/ sandbox job runs only repository scripts, on throwaway
+#     temp repositories — it contacts nothing external.
+# =============================================================================
+name: Custom CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+concurrency:
+  group: custom-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  BUN_VERSION: "1.4.2"   # matches .github/workflows/ci.yml and bun.lock
+  GO_VERSION: "1.27"     # matches go.mod
+
+jobs:
+  # ---------------------------------------------------------------------------
+  go:
+    name: Go — integrity, vet, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # web/dist must exist before any Go package compiles: internal/app imports
+      # the handlers, which import web, whose embed.go fails without the SPA.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Build dashboard SPA
+        run: |
+          cd web
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Fails if a module in the cache does not match go.sum. Cheap, and it is
+      # the check that catches a hand-edited go.sum.
+      - name: Verify module integrity
+        run: go mod verify
+
+      # `go mod tidy` must be a no-op. A PR that adds an import without tidying
+      # would otherwise fail later, in a way that looks unrelated.
+      - name: Check go.mod/go.sum are tidy
+        run: |
+          cp go.mod /tmp/go.mod.bak
+          cp go.sum /tmp/go.sum.bak
+          go mod tidy
+          if ! diff -q /tmp/go.mod.bak go.mod >/dev/null || ! diff -q /tmp/go.sum.bak go.sum >/dev/null; then
+            echo "::error::go.mod or go.sum is not tidy. Run 'go mod tidy' and commit the result."
+            diff -u /tmp/go.mod.bak go.mod || true
+            diff -u /tmp/go.sum.bak go.sum || true
+            exit 1
+          fi
+          echo "go.mod and go.sum are tidy."
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -count=1 ./...
+
+      - name: Build
+        run: go build -ldflags="-s -w" -o /tmp/9router-go ./cmd/9router-go/
+
+      # The binary is built with Go's default -pgo=auto, which silently stops
+      # applying cmd/9router-go/default.pgo if that file is renamed, ignored, or
+      # a -pgo=off flag creeps in. Nothing would fail — it would just get slower.
+      - name: Assert PGO is applied
+        run: |
+          go version -m /tmp/9router-go | grep -q -- '-pgo=' || {
+            echo "::error::PGO profile not applied to the binary. Check cmd/9router-go/default.pgo and any -pgo=off flag."
+            exit 1
+          }
+          go version -m /tmp/9router-go | grep -- '-pgo='
+
+  # ---------------------------------------------------------------------------
+  race:
+    name: Go — race detector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Build dashboard SPA
+        run: |
+          cd web
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # -race needs cgo. -count=1 defeats the cache so every run re-checks.
+      - name: Test with race detector
+        run: go test -race -count=1 -timeout 10m ./...
+
+  # ---------------------------------------------------------------------------
+  integration:
+    name: Go — integration suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Build dashboard SPA
+        run: |
+          cd web
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # The suite is offline by construction: it drives the real router against a
+      # temporary database and a fake upstream, needs no provider credential, and
+      # is verified to pass with no secrets in the environment. `go vet ./...`
+      # skips it because its files carry the integration build tag.
+      - name: Vet integration suite
+        run: go vet -tags=integration ./internal/integration/...
+
+      - name: Test integration
+        run: go test -tags=integration -count=1 -timeout 10m ./internal/integration/...
+
+  # ---------------------------------------------------------------------------
+  web:
+    name: Web — build, test, lint, svelte-check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install dependencies (locked)
+        run: bun install --frozen-lockfile
+
+      - name: Build production bundle
+        run: bun run build
+
+      - name: Unit tests
+        run: bun test
+
+      # oxlint is a warning-only linter in this repo (exit 0 with warnings), so
+      # it is gated on a non-zero exit, not on the presence of warnings.
+      - name: Lint
+        run: bun run lint
+
+      # svelte-check is the only gate that sees a Svelte <script> calling a name
+      # it never imported: tsc -b cannot parse .svelte at all, and oxlint and
+      # vite build both pass such a file. The ratchet blocks unresolved
+      # identifiers outright and pins the remaining type debt at its baseline, so
+      # the count can only fall. `--tsconfig tsconfig.app.json` is mandatory —
+      # the default tsconfig.json has files: [] and checks zero components.
+      - name: Svelte check (ratchet)
+        run: bun run ratchet:svelte
+
+  # ---------------------------------------------------------------------------
+  automation:
+    name: Automation — sync engine sandbox
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Shell syntax check
+        run: |
+          if command -v shellcheck >/dev/null; then
+            shellcheck -S error scripts/upstream-sync.sh
+          fi
+          bash -n scripts/upstream-sync.sh
+          bash -n scripts/upstream-sync-test.sh
+
+      # actionlint catches what a YAML parse cannot: unknown contexts, bad
+      # expressions, shellcheck findings in run blocks. It matters here — a job
+      # level `env:` using ${{ runner.temp }} makes GitHub reject the whole
+      # workflow file and the run dies in 0s with no useful annotation.
+      #
+      # Pinned to a release tag and verified by SHA-256 rather than piping
+      # `main/scripts/download-actionlint.bash` into bash, which would execute a
+      # moving target in CI.
+      - name: Lint workflows
+        run: |
+          set -euo pipefail
+          version=1.7.12
+          sha256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          curl -fsSL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
+          echo "${sha256}  actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -color .github/workflows/*.yml
+
+      # Runs the real sync script against synthetic origin/upstream repositories
+      # and asserts: no-op when there is nothing to do, fast-forward only, no
+      # force-push, custom branch untouched, conflicts reported rather than
+      # resolved, divergence stopped, and idempotency. Touches nothing external.
+      - name: Sandbox upstream-sync scenarios
+        run: bash scripts/upstream-sync-test.sh
