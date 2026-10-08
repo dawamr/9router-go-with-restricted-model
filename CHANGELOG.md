@@ -1,6 +1,46 @@
 # Changelog
 
-## [Unreleased]
+## [v1.9.11-exp.5] - 2026-10-08
+
+Rilis eksperimental ini keluar dari `main` (`e71befb`) tanpa merge. Dibanding
+`v1.9.11-exp.4` (`d3f45db`) hanya satu commit yang baru, dan seluruh isi
+`[Unreleased]` yang dipindahkan ke bawah ini adalah isi `main` pada saat tag
+dibuat:
+
+  #215  seluruh `encoding/json` v1 pindah ke `encoding/json/v2`. 50 file —
+        25 di antaranya produksi — masih tertinggal di v1, jadi satu binary
+        memakai dua mesin JSON dengan semantik berbeda di jalur yang sama (v1
+        mencocokkan nama field case-insensitive dan menerima UTF-8 rusak; v2
+        menolaknya). Empat API v1 dipetakan ke padanannya, bukan dibungkus,
+        dan `internal/handlerutil` kini punya satu set opsi longgar untuk body
+        dari provider dan dari client — tanpa itu jawaban yang sah akan diubah
+        jadi 502. Shim `internal/fastjson` sekarang tipis di atas v2, sonic dan
+        6 dependensi transitifnya dicabut dari `go.mod`, dan determinisme
+        marshal dipertahankan lewat `json.Deterministic(true)` karena prompt
+        cache hulu mengunci kunci map pada byte request.
+
+  fix   `TestUsageWindowCache_DistinctWindowsDoNotShareTotals` tidak lagi
+        bergantung pada jam runner. Baris pemisah antara window `today` dan
+        `24h` diletakkan pada `now-20h`, yang hanya jatuh sebelum tengah malam
+        lokal bila tengah malam sudah berumur minimal 20 jam — antara pukul
+        20:00 dan 03:59 baris itu justru berada **di dalam** `today`, kedua
+        window membaca 2 baris, dan assertion gagal pada cache yang benar.
+        Runner `main` yang mulai 23:23 UTC pernah membuat CI merah pada commit
+        yang sudah lolos review. Baris itu sekarang diletakkan satu detik
+        sebelum tengah malam lokal, dibangun dengan `now.Location()` — cara yang
+        sama seperti `resolveUsagePeriod` membangun `today` — sehingga di luar
+        `today` dan masih di dalam `24h` pada setiap jam, di zona mana pun.
+
+Yang **tidak** ikut: PR #190 (OAuth refresh singleflight, email masking,
+backend test coverage) masih terbuka dan belum ada di `main`.
+
+Kanal tetap eksperimental: GitHub Release PRERELEASE, docker `:exp`,
+`:1.9-exp`, `:1.9.11-exp.5`. `version.json` tetap di 1.9.10 — graduate dengan
+`./scripts/bump-version.sh 1.9.11` saat stabil.
+
+Verifikasi pada tag ini: `go build ./...`, `go vet ./...`, `go test ./...`,
+`go test -count=1 -tags=integration ./internal/integration/...`,
+`bun test`, `bun run build`, `bun run ratchet:svelte`.
 
 ### 🔀 Seluruh `encoding/json` v1 pindah ke `encoding/json/v2`
 
