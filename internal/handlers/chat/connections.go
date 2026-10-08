@@ -550,6 +550,9 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 		return nil, fmt.Errorf("provider %q has no baseUrl in connection data and is not in KnownProviders", provider)
 	}
 
+	if err := substituteProviderPlaceholders(provider, baseCfg, connData); err != nil {
+		return nil, err
+	}
 	// Check if this connection uses an Edge Relay Proxy Pool (Vercel, Cloudflare, Deno)
 	if connData != nil {
 		var relayURL string
@@ -582,6 +585,42 @@ func (h *ChatHandler) getProviderConfig(provider string, connData *ConnectionDat
 	}
 
 	return h.applyProviderOverrides(provider, baseCfg), nil
+}
+
+// substituteProviderPlaceholders completes every {placeholder} a registry baseUrl
+// may carry, reading the value from the connection's providerSpecificData
+// (upstream parity: executors/default.js buildUrl resolves {accountId} there and
+// throws when it is absent). Cloudflare Workers AI is the provider that uses one:
+// its path is accounts/{accountId}/ai/... — with no account id the segment is
+// empty ("accounts//ai/..."), which no Cloudflare route answers, and the request
+// fails with "Could not route to /client/v4/accounts/ai/...".
+func substituteProviderPlaceholders(provider string, cfg *providers.ProviderConfig, connData *ConnectionData) error {
+	if cfg == nil || !strings.Contains(cfg.BaseURL, "{") {
+		return nil
+	}
+	if strings.Contains(cfg.BaseURL, "{accountId}") {
+		accountID := ProviderSpecificDataString(connData, "accountId", "account_id")
+		if accountID == "" {
+			return fmt.Errorf("%s requires accountId in providerSpecificData", provider)
+		}
+		cfg.BaseURL = strings.ReplaceAll(cfg.BaseURL, "{accountId}", accountID)
+	}
+	return nil
+}
+
+// ProviderSpecificDataString returns the first non-empty string value among keys
+// in a connection's providerSpecificData. Exported so the media image adapters
+// can read the same per-connection identifiers (e.g. Cloudflare accountId).
+func ProviderSpecificDataString(connData *ConnectionData, keys ...string) string {
+	if connData == nil || connData.ProviderSpecificData == nil {
+		return ""
+	}
+	for _, k := range keys {
+		if v, ok := connData.ProviderSpecificData[k].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // chatCompletionsURL completes a configured endpoint into the chat-completions

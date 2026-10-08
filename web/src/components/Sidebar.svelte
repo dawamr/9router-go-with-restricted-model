@@ -111,6 +111,15 @@
     if (tab === 'console-log') {
       return activeTab === 'console-log' || activeTab === 'terminal'
     }
+    // Cache and Compression Analytics are Usage sections (#200): they left the
+    // sidebar, so the Usage entry has to stay lit while one of them is open.
+    if (tab === 'analytics') {
+      return (
+        activeTab === 'analytics' ||
+        activeTab === 'usage-cache' ||
+        activeTab === 'usage-compression'
+      )
+    }
     return activeTab === tab
   }
 </script>
