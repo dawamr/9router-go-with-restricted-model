@@ -157,6 +157,30 @@ func TestMigratePlaintextCredentialsKeepsCredentialUsable(t *testing.T) {
 	}
 }
 
+// TestMigratePlaintextCredentialsKeepsCredentialUsableInList guards the list
+// getter the routing path actually uses: getBestConnection walks
+// GetProviderConnections, so a sealed row that comes back unhydrated here
+// fails at request time with "no API key found" even though reading the same
+// row by id works.
+func TestMigratePlaintextCredentialsKeepsCredentialUsableInList(t *testing.T) {
+	repo, path := migrationEnv(t)
+	seedPlaintextConn(t, repo, "conn-a", "sk-secret-a")
+
+	if _, err := repo.MigratePlaintextCredentials(path); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	conns, err := repo.GetProviderConnections("", false)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(conns) != 1 {
+		t.Fatalf("listed %d connections, want 1", len(conns))
+	}
+	if !strings.Contains(conns[0].Data, "sk-secret-a") {
+		t.Errorf("listed connection lost the credential: %s", conns[0].Data)
+	}
+}
+
 // TestMigratePlaintextCredentialsLeavesNonSecrets is the backward-compatibility
 // guarantee: a connection with nothing to seal is left alone.
 func TestMigratePlaintextCredentialsLeavesNonSecrets(t *testing.T) {

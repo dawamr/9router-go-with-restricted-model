@@ -1,5 +1,62 @@
 # Changelog
 
+## [Unreleased]
+
+### 🖼️ `cf/<model>` — generasi gambar Cloudflare AI berfungsi lagi (accountId, body per model, kredensial tersegel)
+
+- **Gejala**: `POST /v1/images/generations` untuk model
+  `cf/@cf/black-forest-labs/flux-1-schnell` gagal dengan
+  `7003 "Could not route to /client/v4/accounts/ai/v1/images/generations …"` —
+  URL memuat account id kosong (`/accounts//ai/...`).
+- **Penyebab 1 — account id kosong.** `providers.go` membangun BaseURL
+  `cloudflare-ai` dari `os.Getenv("CLOUDFLARE_ACCOUNT_ID")`, variabel yang tidak
+  diisi di mana pun; account id yang sebenarnya tersimpan di
+  `providerConnections.providerSpecificData.accountId`. Upstream memakai
+  placeholder `{accountId}` pada BaseURL yang disubstitusi dari
+  `providerSpecificData`, dan error bila kosong. `providers.go` kini memakai
+  placeholder yang sama (substitusi pada salinan config — registry global tidak
+  dimutasi), adapter memanggil `/ai/run/{model}`, dan
+  `cloudflareAccountFromBaseURL` di jalur validasi dashboard mengenali segmen
+  `{...}` sebagai placeholder, bukan akun literal.
+- **Penyebab 2 — satu bentuk body untuk semua model.** Workers AI memakai skema
+  input yang berbeda per model. Schema resmi
+  (`GET /accounts/{acc}/ai/models/schema?model=…`) menunjukkan `flux-1-schnell`
+  hanya menerima `prompt` + `steps` (`num_steps`, `seed`, `negative_prompt`,
+  `width`, `height` semuanya ditolak HTTP 400), `flux-2-*` wajib
+  multipart/form-data, sedangkan keluarga SDXL/leonardo/dreamshaper punya
+  daftar field masing-masing. JSON builder kini menyaring field per model:
+  model dengan schema sempit hanya menerima field yang schema izinkan, dan
+  body OpenAI (`model`/`n`/`size`/`quality`) tidak pernah ikut diteruskan.
+- **Divergensi sengaja dari upstream.** `imageProviders/cloudflareAi.js`
+  mengirim `width`/`height` tanpa syarat — bentuk yang sama yang membuat
+  `flux-1-schnell` gagal di sini. Paritas perilaku untuk endpoint ini mengikuti
+  schema resmi Cloudflare, bukan bug upstream; jangan diseragamkan kembali saat
+  sync upstream berikutnya.
+- **Penyebab 3 — kredensial tersegel tidak ter-hidrasi di jalur daftar.**
+  `GetProviderConnections` adalah satu-satunya getter koneksi yang tidak
+  memanggil `hydrate()`. Pada instalasi dengan vault aktif
+  (`ROUTER_MASTER_KEY`), `getBestConnection` — yang memakai getter daftar untuk
+  routing default — menerima baris tanpa credential dan gagal dengan
+  `"no API key found for <provider>"` pada semua provider tersegel, meski
+  menambatkan `x-connection-id` berhasil (getter ByID menghidrasi). Satu
+  `r.hydrate(&conn)` menyamakan ketiganya; efeknya generik untuk seluruh
+  provider, bukan hanya Cloudflare, dan no-op pada instalasi tanpa vault.
+  `/api/connections` tetap hanya mengirim `apiKeyMasked` (diverifikasi).
+- **Fiks**: adapter self-contained `internal/handlers/media/cloudflare_image.go`
+  (pola yang sama dengan `antigravity_image.go`) membangun URL `/ai/run/{model}`,
+  body JSON atau multipart per model, dan menormalkan
+  `{"result":{"image":…}}` → `{created, data:[{b64_json}]}`. `media.go`
+  meneruskan provider `cloudflare-ai` ke adapter ini, bukan ke forwarding
+  generik.
+- **Verifikasi**: instance kedua + salinan DB produksi (vault aktif) —
+  `flux-1-schnell` HTTP 200, 673.987 byte JPEG (`ffd8ffe0`), dan
+  `flux-2-klein-4b` multipart HTTP 200, 136.651 byte — keduanya lewat routing
+  default tanpa pin koneksi. `cloudflare_image_test.go` (table-driven: bentuk
+  URL, whitelist field per model termasuk kasus whitelist flux-1-schnell,
+  normalisasi respons) dan `TestMigratePlaintextCredentialsKeepsCredentialUsableInList`
+  (gagal tanpa hydrate) menjaga setiap kontrak. `go build ./...`,
+  `go test ./...` (40 paket ok), `make build` hijau.
+
 ## [v1.9.11-exp.5] - 2026-10-08
 
 Rilis eksperimental ini keluar dari `main` (`e71befb`) tanpa merge. Dibanding
