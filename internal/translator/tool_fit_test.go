@@ -1,7 +1,7 @@
 package translator
 
 import (
-	"encoding/json"
+	json "encoding/json/v2"
 	"strings"
 	"testing"
 )
@@ -384,5 +384,36 @@ func TestFitToolNames_ExactBoundary(t *testing.T) {
 				t.Errorf("body must be untouched at the limit, got: %s", got)
 			}
 		})
+	}
+}
+
+func TestFitToolNames_GeminiContents(t *testing.T) {
+	longName := "mcp__gemini_server__call_a_super_long_function_name_that_exceeds_limits_123"
+	body := []byte(`{
+		"contents": [
+			{"parts": [{"functionCall": {"name": "` + longName + `"}}]},
+			{"parts": [{"functionResponse": {"name": "` + longName + `"}}]}
+		]
+	}`)
+	got, toolMap := FitToolNames(body)
+	if len(toolMap) != 1 {
+		t.Fatalf("expected 1 tool mapped, got %v", toolMap)
+	}
+	if strings.Contains(string(got), longName) {
+		t.Errorf("expected long name replaced in contents: %s", string(got))
+	}
+}
+
+func TestFitToolNames_LegacyFunctions(t *testing.T) {
+	longName := "mcp__legacy_server__call_a_super_long_function_name_that_exceeds_limits_123"
+	body := []byte(`{
+		"functions": [{"name": "` + longName + `"}]
+	}`)
+	got, toolMap := FitToolNames(body)
+	if len(toolMap) != 1 {
+		t.Fatalf("expected 1 tool mapped, got %v", toolMap)
+	}
+	if strings.Contains(string(got), longName) {
+		t.Errorf("expected long name replaced in functions: %s", string(got))
 	}
 }

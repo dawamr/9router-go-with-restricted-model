@@ -543,8 +543,10 @@ func validateV1M(ctx context.Context, apiKey string) validateOutcome {
 	}
 }
 
-// cloudflareAccountFromBaseURL extracts the account id baked into the registry
-// BaseURL from a CLOUDFLARE_ACCOUNT_ID env var, if any.
+// cloudflareAccountFromBaseURL extracts an account id baked into a BaseURL. It
+// returns "" for the registry placeholder ({accountId}) — a placeholder is not a
+// value, and treating it as one made validation probe a literal "{accountId}"
+// URL instead of reporting the missing id.
 func cloudflareAccountFromBaseURL(baseURL string) string {
 	const marker = "/accounts/"
 	idx := strings.Index(baseURL, marker)
@@ -552,8 +554,12 @@ func cloudflareAccountFromBaseURL(baseURL string) string {
 		return ""
 	}
 	rest := baseURL[idx+len(marker):]
-	if end := strings.Index(rest, "/"); end >= 0 {
-		return rest[:end]
+	end := strings.Index(rest, "/")
+	if end >= 0 {
+		rest = rest[:end]
+	}
+	if rest == "" || strings.HasPrefix(rest, "{") {
+		return ""
 	}
 	return rest
 }

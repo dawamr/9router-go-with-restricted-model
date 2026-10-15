@@ -13,6 +13,7 @@
     probeReplacementKey,
     type CredentialCheck
   } from './credential'
+  import { emailPrivacy, formatEmailLabel } from '../../lib/privacy'
 
   export interface ConnectionUpdate {
     name?: string
@@ -194,7 +195,7 @@
       {#if connection.email}
         <div>
           <span class="block text-xs font-medium text-text-muted mb-1">Email</span>
-          <p class="text-xs text-text-main font-medium">{connection.email}</p>
+          <p class="text-xs text-text-main font-medium">{formatEmailLabel(connection.email, $emailPrivacy)}</p>
         </div>
       {/if}
 

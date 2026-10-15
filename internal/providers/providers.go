@@ -2,7 +2,6 @@ package providers
 
 import (
 	"net/http"
-	"os"
 	"strings"
 )
 
@@ -390,7 +389,11 @@ var KnownProviders = map[string]ProviderConfig{
 		AuthScheme: "bearer",
 	},
 	"cloudflare-ai": {
-		BaseURL:    "https://api.cloudflare.com/client/v4/accounts/" + os.Getenv("CLOUDFLARE_ACCOUNT_ID") + "/ai/v1/chat/completions",
+		// {accountId} is substituted per request from the connection's
+		// providerSpecificData (upstream parity: executors/default.js buildUrl).
+		// Hardcoding it from the environment left the path segment empty —
+		// accounts//ai/... — which no Cloudflare route answers.
+		BaseURL:    "https://api.cloudflare.com/client/v4/accounts/{accountId}/ai/v1/chat/completions",
 		AuthHeader: "Authorization",
 		AuthScheme: "bearer",
 	},

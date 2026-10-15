@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"encoding/json"
+	json "encoding/json/v2"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -233,9 +233,22 @@ func TestUsageWindowCache_DistinctWindowsDoNotShareTotals(t *testing.T) {
 	resetUsageWindowCache()
 	t.Cleanup(resetUsageWindowCache)
 
-	now := time.Now().UTC()
-	// Midnight is 8 hours ago, so this row is inside 24h but outside today.
-	seedHistoryAt(t, repo, now.Add(-20*time.Hour), "openai", "gpt-5.5", "conn-1", "sk-a", 100, 10, 0.01, 0)
+	// The row that separates the two windows is placed relative to local
+	// midnight, not relative to now. A fixed "20 hours ago" only lands before
+	// midnight when midnight is at least 20h back, so between 20:00 and 03:59
+	// that row falls *inside* today and the assertion below fails against a
+	// correct cache — it did, on a runner that started at 23:23 UTC.
+	//
+	// One second before midnight is outside today at every hour of the day, and
+	// still inside 24h at every hour too: midnight is never a full 24 hours old,
+	// so it is always strictly later than the 24h window's lower bound.
+	//
+	// Local midnight is built the way resolveUsagePeriod builds it — `today`
+	// cuts at midnight in now.Location(), so a UTC-midnight marker would drift
+	// by the runner's offset and could put the row back inside today.
+	now := time.Now()
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	seedHistoryAt(t, repo, midnight.Add(-time.Second), "openai", "gpt-5.5", "conn-1", "sk-a", 100, 10, 0.01, 0)
 	seedHistoryAt(t, repo, now.Add(-time.Hour), "openai", "gpt-5.5", "conn-1", "sk-a", 100, 10, 0.01, 0)
 
 	today := usageStatsBody(t, repo, "today")

@@ -632,6 +632,14 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 					continue
 				}
 			}
+			if isCloudflareImageEndpoint(endpoint) && isCloudflareAIProvider(subInfo.Provider) {
+				if err := h.handleCloudflareImage(w, r, body, subInfo); err == nil {
+					return
+				} else {
+					lastErr = err.Error()
+					continue
+				}
+			}
 			if (endpoint == "/v1/audio/transcriptions" || endpoint == "/audio/transcriptions") && (subInfo.Provider == "antigravity" || subInfo.Provider == "ag") {
 				if err := h.handleAntigravitySTT(w, r, body, subInfo); err == nil {
 					return
@@ -760,6 +768,15 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 	}
 	if (endpoint == "/v1/images/generations" || endpoint == "/images/generations") && (modelInfo.Provider == "antigravity" || modelInfo.Provider == "ag") {
 		if err := h.handleAntigravityImage(w, r, body, modelInfo); err != nil {
+			handlerutil.WriteJSONError(w, http.StatusBadGateway, err.Error())
+		}
+		return
+	}
+	// Cloudflare Workers AI serves images from /ai/run/{model}, not from an
+	// OpenAI-shaped /images/generations route, so it needs its own adapter
+	// (upstream image-generation provider dispatch).
+	if isCloudflareImageEndpoint(endpoint) && isCloudflareAIProvider(modelInfo.Provider) {
+		if err := h.handleCloudflareImage(w, r, body, modelInfo); err != nil {
 			handlerutil.WriteJSONError(w, http.StatusBadGateway, err.Error())
 		}
 		return

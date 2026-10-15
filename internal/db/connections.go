@@ -232,6 +232,15 @@ func (r *Repo) GetProviderConnections(provider string, activeOnly bool) ([]*mode
 		if err := scanConnection(rows.Scan, &conn); err != nil {
 			return nil, err
 		}
+		// Re-inject sealed credentials, same as GetProviderConnectionByID and
+		// GetProviderConnectionByName. Without this, every caller that routes
+		// through the list (getBestConnection's default lookup included) sees
+		// an unhydrated Data blob and fails with "no API key found for
+		// <provider>" on any install where the vault is sealing credentials,
+		// even though pinning the exact connection by id works fine. hydrate
+		// no-ops when sealing is disabled, so this changes nothing for a
+		// plaintext install.
+		r.hydrate(&conn)
 		connections = append(connections, &conn)
 	}
 
