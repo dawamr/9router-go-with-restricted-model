@@ -1,0 +1,120 @@
+# =============================================================================
+# Upstream sync — keeps the fork's default branch current with upstream, and
+# proposes upstream changes to the customisation branch through a pull request.
+#
+# One workflow, deliberately. GitHub does not create workflow runs for events
+# raised by the built-in GITHUB_TOKEN — a push made with that token cannot start
+# a `push`-triggered workflow. Chaining a second workflow on the integration
+# branch's push would therefore silently never fire. The PR is opened here, with
+# the same token, which is the supported path.
+#
+# The only event GITHUB_TOKEN can raise that produces runs is
+# pull_request opened/synchronize/reopened, and those arrive in an
+# approval-required state. Because this PR targets a NON-default branch
+# (custom/production), CI on it runs from the fork's own branches; if GitHub
+# still gates it, one "Approve workflows to run" click releases it.
+#
+# Safety summary:
+#   * contents:write + pull-requests:write — the minimum that can push a branch
+#     and open a PR. No secrets are referenced anywhere.
+#   * Never merges. Never deploys. Merging is a human action.
+#   * Never force-pushes, except --force-with-lease on the ephemeral integration
+#     branch (which is rebuilt by design; a lease guards against clobbering a
+#     concurrent change).
+#   * Never writes to, resets, or rewrites custom/production or the fork's main.
+#   * Divergence and merge conflicts stop the run and are reported unresolved.
+# =============================================================================
+name: Upstream sync
+
+on:
+  schedule:
+    # 02:17 UTC daily — deliberately off the hour to dodge GitHub's top-of-hour
+    # scheduling spike.
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report only; push nothing"
+        required: false
+        type: boolean
+        default: false
+
+# Never let two syncs race on the same branches. Do not cancel an in-flight run:
+# a half-finished push could leave the integration branch stale.
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Sync upstream and propose to custom/production
+    runs-on: ubuntu-latest
+    # A literal path, NOT ${{ runner.temp }}: the `runner` context is not
+    # available in a job-level `env:` block (only in steps), and using it here
+    # makes GitHub reject the entire workflow file — the run fails in 0s with
+    # "This run likely failed because of a workflow file issue".
+    env:
+      REPORT_FILE: /tmp/upstream-sync-report.json
+
+    steps:
+      # fetch-depth 0: the sync computes merges across upstream/main, origin/main
+      # and custom/production, so full history must be present. `origin` stays
+      # the fork with the default token, so the script's `git push origin` works
+      # without wiring a URL containing credentials (which would leak into logs).
+      - name: Check out the fork
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      # Upstream is public: no credential needed and none is provided.
+      # Idempotent, so a re-run does not fail on a pre-existing remote.
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/luqman-v1/9router-go.git 2>/dev/null \
+            || git remote set-url upstream https://github.com/luqman-v1/9router-go.git
+          git remote -v
+
+      # Capture the exit code rather than propagating it here, so the summary is
+      # always published and the verdict is decided in one place below.
+      # Exit codes: 0 done, 10 diverged, 20 conflicts, 30 config error, 40 PR failed.
+      - name: Run upstream sync
+        id: sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: |
+          set +e
+          bash scripts/upstream-sync.sh
+          rc=$?
+          echo "sync_exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Publish report to job summary
+        if: always()
+        run: |
+          {
+            echo "## Upstream sync report"
+            echo
+            echo "Exit code: \`${{ steps.sync.outputs.sync_exit_code }}\`"
+            echo
+            if [ -f "$REPORT_FILE" ]; then
+              echo '```json'
+              cat "$REPORT_FILE"
+              echo '```'
+            else
+              echo "_No report file was produced._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # A non-zero exit is a real outcome worth a red run. Divergence (10) and
+      # conflicts (20) both mean automation stopped on purpose and a human must
+      # decide; a green run would bury that.
+      - name: Fail when human action is required
+        if: steps.sync.outputs.sync_exit_code != '0'
+        run: |
+          echo "::error::Upstream sync requires human action (exit ${{ steps.sync.outputs.sync_exit_code }}). See the job summary."
+          exit 1
