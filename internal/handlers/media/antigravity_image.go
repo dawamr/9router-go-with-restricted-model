@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"9router/proxy/internal/handlers/chat"
+	"9router/proxy/internal/handlerutil"
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/models"
 	"9router/proxy/internal/providers"
@@ -210,9 +211,7 @@ func (h *MediaHandler) tryAntigravityImageConn(w http.ResponseWriter, r *http.Re
 		return fmt.Errorf("format image response: %w", err)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(formatted)
+	handlerutil.RespondImage(w, r, http.StatusOK, formatted)
 
 	if h.Repo != nil {
 		h.Repo.UpdateConnectionLastUsed(conn.ID)

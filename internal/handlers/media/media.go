@@ -997,6 +997,38 @@ func (h *MediaHandler) forwardMediaRequest(w http.ResponseWriter, r *http.Reques
 		resp.Body = io.NopCloser(bytes.NewReader(errBody))
 	}
 
+	isImageEndpoint := endpoint == "/v1/images/generations" || endpoint == "/images/generations"
+	if resp.StatusCode == http.StatusOK && isImageEndpoint && handlerutil.WantsRawImage(r) {
+		// Only the raw-image opt-in needs the body in memory to re-shape it;
+		// every other response (including the default JSON contract) keeps
+		// streaming straight through below (AGENTS.md §4.A: stream, don't
+		// buffer, unless reshaping strictly requires it).
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr == nil {
+			for k, v := range resp.Header {
+				if !strings.EqualFold(k, "Content-Type") && !strings.EqualFold(k, "Content-Length") {
+					w.Header()[k] = v
+				}
+			}
+			handlerutil.RespondImage(w, r, resp.StatusCode, respBody)
+			if conn != nil {
+				h.Repo.UpdateConnectionLastUsed(conn.ID)
+				latencyMs := time.Since(start).Milliseconds()
+				logInfo := &shared.UsageLogInfo{
+					Provider:     modelInfo.Provider,
+					Model:        modelInfo.Model,
+					ConnectionID: conn.ID,
+					APIKey:       apiKey,
+					Endpoint:     endpoint,
+				}
+				h.ChatH.LogUsage(r.Context(), logInfo, nil, latencyMs, body, nil)
+			}
+			return
+		}
+		// Read failed: fall through to the normal streaming path below with
+		// whatever remains of resp.Body (best-effort, never a hard error).
+	}
+
 	for k, v := range resp.Header {
 		w.Header()[k] = v
 	}

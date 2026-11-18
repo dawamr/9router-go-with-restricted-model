@@ -3,10 +3,13 @@ package handlerutil
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"9router/proxy/internal/constants"
 )
@@ -59,6 +62,112 @@ func WriteJSONError(w http.ResponseWriter, status int, message string) {
 	if err := json.MarshalWrite(w, errResp, deterministicJSON); err != nil {
 		w.Write([]byte(`{"error":{"message":"internal error","type":"server_error","code":"internal_server_error"}}`))
 	}
+}
+
+// wantsRawImageQueryKeys are the query parameters that opt an
+// /v1/images/generations caller into a raw binary response instead of the
+// OpenAI-shaped {data:[{b64_json|url}]} envelope. response_format=binary is
+// the exact contract the upstream dashboard playground uses (decolua/9router
+// GenericExampleCard.js: `apiPath + (wantBinary ? "?response_format=binary" : "")`,
+// detected on the client by `content-type` starting with "image/"); raw=1 and
+// format=binary are accepted as more convenient aliases for curl use.
+var wantsRawImageQueryKeys = []string{"response_format", "raw", "format"}
+
+// WantsRawImage reports whether the caller asked for the raw image bytes
+// instead of the OpenAI-shaped JSON envelope: either an explicit
+// ?response_format=binary query flag (upstream parity, see
+// wantsRawImageQueryKeys) or an Accept header that names an image type
+// specifically (never a bare "*/*" — that is every HTTP client's default and
+// must not silently change the wire contract). Opt-in only: the default
+// stays the documented JSON contract AGENTS.md §1 requires for every /v1/*
+// route, so existing clients parsing b64_json never see a behavior change.
+func WantsRawImage(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	q := r.URL.Query()
+	for _, key := range wantsRawImageQueryKeys {
+		switch strings.ToLower(q.Get(key)) {
+		case "1", "true", "binary", "raw":
+			return true
+		}
+	}
+	for _, accept := range r.Header.Values("Accept") {
+		for _, part := range strings.Split(accept, ",") {
+			part = strings.TrimSpace(strings.SplitN(part, ";", 2)[0])
+			if part != "" && part != "*/*" && strings.HasPrefix(part, "image/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// imageEnvelope is the minimal OpenAI /v1/images/generations response shape:
+// {"created":..., "data":[{"b64_json":"...", "url":"..."}]}. Every provider
+// adapter in this repo normalizes to exactly this shape before responding, so
+// decoding it back out here never needs provider-specific knowledge.
+type imageEnvelope struct {
+	Data []struct {
+		B64JSON string `json:"b64_json"`
+		URL     string `json:"url"`
+	} `json:"data"`
+}
+
+// sniffImageContentType returns an image/* MIME type from the leading bytes,
+// falling back to image/png (Workers AI and most generators default there)
+// when the magic bytes are not recognized rather than guessing wrong.
+func sniffImageContentType(data []byte) string {
+	if ct := http.DetectContentType(data); strings.HasPrefix(ct, "image/") {
+		return ct
+	}
+	return "image/png"
+}
+
+// RespondImage writes an /v1/images/generations response. When the caller
+// opted into raw bytes via WantsRawImage, it decodes the first image out of
+// the normalized {data:[{b64_json|url}]} envelope and writes it as a binary
+// image/* body instead of JSON — so opening the endpoint directly in a
+// browser or an `curl -o out.png` shows the picture, not a base64 blob. Any
+// condition that is not a clean single-image JSON body (parse failure, a
+// provider error payload, a url-only entry, zero images) falls back to
+// writing respBody byte-for-byte unmodified: the documented JSON contract is
+// always the safe default, never silently downgraded to an error page.
+func RespondImage(w http.ResponseWriter, r *http.Request, status int, respBody []byte) {
+	if status != http.StatusOK || !WantsRawImage(r) {
+		w.Header().Set(constants.HeaderContentType, constants.ContentTypeJSON)
+		w.WriteHeader(status)
+		_, _ = w.Write(respBody)
+		return
+	}
+	var env imageEnvelope
+	if err := json.Unmarshal(respBody, &env); err != nil || len(env.Data) == 0 {
+		w.Header().Set(constants.HeaderContentType, constants.ContentTypeJSON)
+		w.WriteHeader(status)
+		_, _ = w.Write(respBody)
+		return
+	}
+	entry := env.Data[0]
+	if entry.B64JSON == "" {
+		// url-only entry (e.g. DALL-E default response_format): nothing to
+		// decode locally without an extra upstream fetch, so stay on the
+		// documented JSON contract rather than redirecting or proxying.
+		w.Header().Set(constants.HeaderContentType, constants.ContentTypeJSON)
+		w.WriteHeader(status)
+		_, _ = w.Write(respBody)
+		return
+	}
+	raw, err := base64.StdEncoding.DecodeString(entry.B64JSON)
+	if err != nil {
+		w.Header().Set(constants.HeaderContentType, constants.ContentTypeJSON)
+		w.WriteHeader(status)
+		_, _ = w.Write(respBody)
+		return
+	}
+	w.Header().Set(constants.HeaderContentType, sniffImageContentType(raw))
+	w.Header().Set("Content-Length", strconv.Itoa(len(raw)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
 }
 
 // WriteJSON writes a JSON response directly to the ResponseWriter with zero intermediate byte buffering.

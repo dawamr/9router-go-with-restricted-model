@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
+  import { onDestroy, onMount } from 'svelte'
   import { api, getStoredAPIKey, type APIKey, type ProviderConnection, type Settings } from '../../api/client'
   import { copyToClipboard } from '../../lib/clipboard'
   import { getModelKind, getModelsByProviderId, PROVIDER_ID_TO_ALIAS } from '../../lib/models'
@@ -366,6 +366,26 @@
   let isTestingExample = $state(false)
   let exampleResponse = $state<string | null>(null)
   let exampleLatency = $state<number | null>(null)
+  // Image output format and preview. "json" keeps the documented
+  // {data:[{b64_json}]} contract the playground has always shown; "binary"
+  // asks the gateway for ?response_format=binary and renders the returned
+  // image bytes directly (upstream parity: decolua/9router
+  // GenericExampleCard.js imageOutputFormat json | binary).
+  let imageOutputFormat = $state<'json' | 'binary'>('json')
+  // A binary response becomes an object URL (revoked on the next run and on
+  // unmount); a JSON response carries its image inline. Same precedence as
+  // upstream: binaryImageUrl || data:image/png;base64,... || url.
+  let imageBinaryUrl = $state<string | null>(null)
+  let imageInlineSrc = $state<string | null>(null)
+  let imagePreviewSrc = $derived(imageBinaryUrl || imageInlineSrc)
+
+  function revokeImagePreview() {
+    if (imageBinaryUrl) {
+      try { URL.revokeObjectURL(imageBinaryUrl) } catch {}
+      imageBinaryUrl = null
+    }
+    imageInlineSrc = null
+  }
 
   const ttsVoices = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'nova', 'onyx', 'sage', 'shimmer']
 
@@ -401,6 +421,10 @@
     if (stored) activeApiKey = stored
   })
 
+  onDestroy(() => {
+    revokeImagePreview()
+  })
+
   let exampleEndpoint = $derived.by(() => {
     const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:20130'
     if (kind === 'video') return `${origin}/v1/videos/generations`
@@ -423,7 +447,9 @@
       return `curl -X POST ${origin}/v1/videos/generations \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${key}" \\\n  -d '{"model":"${qualifiedModel}","prompt":"${exampleInput || 'A serene lake at sunset'}"}'`
     }
     if (kind === 'image') {
-      return `curl -X POST ${origin}/v1/images/generations \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${key}" \\\n  -d '{"model":"${qualifiedModel}","prompt":"${exampleInput || 'A cute cat wearing a hat'}","n":1,"size":"auto","quality":"auto","background":"auto","image_detail":"high","output_format":"png"}'`
+      const binary = imageOutputFormat === 'binary'
+      const path = binary ? '/v1/images/generations?response_format=binary' : '/v1/images/generations'
+      return `curl -X POST ${origin}${path} \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${key}" \\\n  -d '{"model":"${qualifiedModel}","prompt":"${exampleInput || 'A cute cat wearing a hat'}","n":1,"size":"auto","quality":"auto","background":"auto","image_detail":"high","output_format":"png"}'${binary ? ' \\\n  --output image.png' : ''}`
     }
     if (kind === 'embedding') {
       return `curl -X POST ${origin}/v1/embeddings \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${key}" \\\n  -d '{"model":"${qualifiedModel}","input":"${exampleInput || 'The quick brown fox jumps over the lazy dog'}"}'`
@@ -483,6 +509,7 @@
   async function handleTestExample() {
     isTestingExample = true
     exampleResponse = null
+    revokeImagePreview()
     const start = performance.now()
     try {
       const defaultModel = selectedModelId || mediaModels[0]?.id || ''
@@ -495,7 +522,7 @@
         headers['x-provider-connection-id'] = selectedConnId
       }
 
-      let res: Response
+      let res: Response | undefined
       if (kind === 'video') {
         headers['Content-Type'] = 'application/json'
         res = await fetch('/v1/videos/generations', {
@@ -505,7 +532,8 @@
         })
       } else if (kind === 'image') {
         headers['Content-Type'] = 'application/json'
-        res = await fetch('/v1/images/generations', {
+        const imageQuery = imageOutputFormat === 'binary' ? '?response_format=binary' : ''
+        res = await fetch(`/v1/images/generations${imageQuery}`, {
           method: 'POST',
           headers,
           body: JSON.stringify({ model: qualifiedModel, prompt: exampleInput, n: 1, size: 'auto', quality: 'auto', background: 'auto', image_detail: 'high', output_format: 'png' })
@@ -578,12 +606,25 @@
           body: JSON.stringify(reqObj),
         })
       }
+      if (!res) throw new Error(`Unsupported media kind: ${kind}`)
 
       exampleLatency = Math.round(performance.now() - start)
       const cType = res.headers.get('content-type') || ''
-      if (cType.includes('application/json')) {
+      if (kind === 'image' && cType.startsWith('image/')) {
+        const blob = await res.blob()
+        imageBinaryUrl = URL.createObjectURL(blob)
+        exampleResponse = `// Received image binary: ${blob.type || 'image/png'} (${Math.max(1, Math.round(blob.size / 1024))} KB)`
+      } else if (cType.includes('application/json')) {
         const json = await res.json()
         exampleResponse = JSON.stringify(json, null, 2)
+        if (kind === 'image') {
+          const first = json?.data?.[0]
+          if (typeof first?.b64_json === 'string') {
+            imageInlineSrc = `data:image/png;base64,${first.b64_json}`
+          } else if (typeof first?.url === 'string') {
+            imageInlineSrc = first.url
+          }
+        }
       } else if (cType.includes('audio/') || cType.includes('octet-stream')) {
         const blob = await res.blob()
         exampleResponse = `// Received audio binary: ${blob.type || 'audio/mp3'} (${blob.size} bytes)`
@@ -980,6 +1021,20 @@
             {/if}
           </div>
         </div>
+        {#if kind === 'image'}
+          <div class="flex min-w-0 flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+            <span class="w-full text-xs font-medium text-text-muted sm:w-20 sm:shrink-0">Output Format</span>
+            <div class="w-full min-w-0 flex-1">
+              <select
+                bind:value={imageOutputFormat}
+                class="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary text-text-main"
+              >
+                <option value="json">JSON (base64)</option>
+                <option value="binary">Binary (image file)</option>
+              </select>
+            </div>
+          </div>
+        {/if}
       {:else if kind === 'tts'}
         <div class="flex min-w-0 flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
           <span class="w-full text-xs font-medium text-text-muted sm:w-20 sm:shrink-0">Voice</span>
@@ -1220,6 +1275,27 @@
           </span>
         </div>
         <pre class="bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre-wrap break-all opacity-70">{exampleResponse || defaultResponse}</pre>
+        {#if kind === 'image' && imagePreviewSrc}
+          <div class="mt-2">
+            <div class="flex items-center justify-end mb-1.5">
+              <a
+                href={imagePreviewSrc}
+                download="image.png"
+                class="inline-flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors cursor-pointer"
+              >
+                <span class="material-symbols-outlined text-[14px]">download</span>
+                Download
+              </a>
+            </div>
+            <img
+              src={imagePreviewSrc}
+              alt="Generated"
+              class="max-w-full rounded-lg border border-border"
+              loading="lazy"
+              decoding="async"
+            />
+          </div>
+        {/if}
       </div>
     </div>
     </div>

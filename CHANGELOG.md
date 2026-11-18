@@ -57,6 +57,35 @@
   (gagal tanpa hydrate) menjaga setiap kontrak. `go build ./...`,
   `go test ./...` (40 paket ok), `make build` hijau.
 
+### 🖼️ Endpoint images/dashboard — respons binary opsional + preview gambar di card Example
+
+- **Respons binary opt-in (`?response_format=binary`).** `POST /v1/images/generations`
+  masih mengembalikan `{created, data:[{b64_json}]}` secara default (kontrak
+  OpenAI SDK dipertahankan — tidak breaking). Bila permintaan memuat query
+  `response_format=binary` (alias `raw=1`/`format=binary`, atau `Accept: image/*`),
+  gateway mengembalikan byte gambar langsung dengan `Content-Type` yang sesuai.
+  Helper generik `handlerutil.WantsRawImage`/`RespondImage` dipakai di tiga titik
+  tulis respons gambar (`cloudflare_image.go`, `antigravity_image.go`, dan blok
+  endpoint gambar di `forwardMediaRequest`); status bukan 200 atau body tanpa
+  gambar tetap jatuh ke JSON apa adanya, dan jalur non-gambar tetap streaming.
+  Kontrak query sengaja sama dengan playground upstream
+  (`decolua/9router` `GenericExampleCard.js`: `apiPath + "?response_format=binary"`).
+- **Preview + tombol Download di card Example (kind = image).** Panel RESPONSE
+  kini menampilkan gambar hasil langsung di bawah JSON/narasi dan menyediakan
+  tautan `Download` (`image.png`), mengikuti perilaku upstream
+  `GenericExampleCard.js` (`imageOutputFormat` JSON | Binary, prioritas sumber
+  `binaryImageUrl || data:image/png;base64,… || url`). Mode `JSON (base64)`
+  merender `b64_json` via data URL; mode `Binary (image file)` meminta respons
+  binary dan merender byte sebagai object URL (di-revoke saat run berikutnya
+  dan saat komponen unmount). Dropdown **Output Format** dan perintah `curl`
+  ikut menyesuaikan (`?response_format=binary` + `--output image.png`).
+- **Verifikasi**: browser sungguhan (headless Chrome + CDP) terhadap build
+  produksi — mode JSON: `img` 1024×1024 dari data URL, mode Binary: `img`
+  1024×1024 dari blob URL + tautan download `image.png`. `bun run build`,
+  `make ratchet:svelte` (0 unresolved identifier; total error turun 84 → 78),
+  `go test ./...`, dan `make build` hijau; bundle yang disajikan diverifikasi
+  memuat penanda fitur.
+
 ## [v1.9.11-exp.5] - 2026-10-08
 
 Rilis eksperimental ini keluar dari `main` (`e71befb`) tanpa merge. Dibanding
